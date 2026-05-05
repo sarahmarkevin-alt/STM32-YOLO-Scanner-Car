@@ -1,0 +1,1 @@
+yolo export model=car_detect.pt format=ncnn

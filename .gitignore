@@ -53,3 +53,14 @@ dkms.conf
 
 # debug information files
 *.dwo
+# === YOLO & AI Model Files ===
+*.pt
+*.torchscript
+*.bin
+*.param
+*.onnx
+
+# === Python & Logs ===
+__pycache__/
+*.pyc
+*.log
