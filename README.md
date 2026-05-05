@@ -1,7 +1,10 @@
 # STM32-YOLO-Scanner-Car
 基于STM32F103C8T6和树莓派5的智能跟踪打击小车（第十三届光电设计大赛项目）
 主控部分：用STM32F103C8T6做下位机，直接驱动控制二自由度云台，直接驱动两路避障超声波SR04，串口与电机驱动板通信，轮子和电机均使用PID控制
+
 FreeRTOS系统中，将接受上位机发送的消息转动云台设为最高优先级，接受不到让出进程100ms
 ，电机运动设为优先级5（后面做详细解释，任务解耦）
+
 视觉（加了HAILO加速）：讲解后面再写
+
 hardware:https://github.com/hsin-hsv/control_science_sensor/tree/homework-4
