@@ -4,3 +4,4 @@
 FreeRTOS系统中，将接受上位机发送的消息转动云台设为最高优先级，接受不到让出进程100ms
 ，电机运动设为优先级5（后面做详细解释，任务解耦）
 视觉（加了HAILO加速）：讲解后面再写
+hardware:https://github.com/hsin-hsv/control_science_sensor/tree/homework-4
