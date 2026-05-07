@@ -34,7 +34,7 @@ uint8_t Urxbuf[8]; //串口接收数据数组
 TaskHandle_t StartTask_Handler; //任务句柄
 void start_task(void *pvParameters); //任务函数
  
-#define LED1_TASK_PRIO 6 //任务优先级
+#define LED1_TASK_PRIO 2 //任务优先级
 #define LED1_STK_SIZE 64 //任务堆栈大小
 TaskHandle_t LED1Task_Handler; //任务句柄
 void led1_task(void *p_arg); //任务函数
@@ -46,22 +46,29 @@ TaskHandle_t PrintTask_Handler;// 定义打印任务的句柄
 void print_task(void *p_arg);// 打印任务函数
 
 // 定义 PID 任务的优先级和堆栈大小
-#define PID_TASK_PRIO 5 // 任务优先级
+#define PID_TASK_PRIO 5 // 任务优先级5
 #define PID_STK_SIZE 64 // 任务堆栈大小
 TaskHandle_t PIDTask_Handler; // 定义 PID 任务的句柄
 void pid_task(void *p_arg); // PID 任务函数
 
-#define TARGET_TASK_PRIO 6 //任务优先级
+#define TARGET_TASK_PRIO 3 //任务优先级5
 #define TARGET_STK_SIZE 64 //任务堆栈大小
 TaskHandle_t TARGETTask_Handler; //任务句柄
 void target_task(void *p_arg); //任务函数
 
 // 定义电机控制任务的优先级和堆栈大小
-#define MOTOR_TASK_PRIO 5 // 任务优先级
+#define MOTOR_TASK_PRIO 6 // 任务优先级3
 #define MOTOR_STK_SIZE 256 // 任务堆栈大小
 TaskHandle_t MotorTask_Handler; // 任务句柄
 void motor_task(void *p_arg); // 电机控制任务函数
 
+#define MOTOR_INIT_TASK_PRIO 1
+#define MOTOR_INIT_STK_SIZE 64
+TaskHandle_t MotorInitTASK_Handler;
+void motor_init_task(void *p_arg);
+
+SemaphoreHandle_t MotorStartSem;//二元信号量保证电机在初始化后才进行运动//
+SemaphoreHandle_t xTargetMutex;
 int main(void)
   { 
 		NVIC_PriorityGroupConfig(NVIC_PriorityGroup_4);
@@ -84,6 +91,8 @@ int main(void)
 
 void start_task(void *pvParameters) 
 { 
+	MotorStartSem=xSemaphoreCreateBinary();
+	xTargetMutex=xSemaphoreCreateMutex();
 	taskENTER_CRITICAL(); //进入临界区
 	//创建 LED1任务
 	xTaskCreate((TaskFunction_t )led1_task, 
@@ -119,6 +128,15 @@ void start_task(void *pvParameters)
 				(UBaseType_t)TARGET_TASK_PRIO, // 任务优先级
 				(TaskHandle_t *)&TARGETTask_Handler // 任务句柄
 		);
+		//创建电机初始化任务
+		xTaskCreate(
+				(TaskFunction_t)motor_init_task, 
+				(const char *)"motor_init_task", 
+				(uint16_t)MOTOR_INIT_STK_SIZE, 
+				(void *)NULL, 
+				(UBaseType_t)MOTOR_INIT_TASK_PRIO, 
+				(TaskHandle_t *)&MotorInitTASK_Handler
+		);
 		// 创建电机控制任务
 		xTaskCreate(
 				(TaskFunction_t)motor_task, 
@@ -128,9 +146,9 @@ void start_task(void *pvParameters)
 				(UBaseType_t)MOTOR_TASK_PRIO, 
 				(TaskHandle_t *)&MotorTask_Handler
 		);
-							
-	vTaskDelete(StartTask_Handler); //删除开始任务
+
 	taskEXIT_CRITICAL(); //退 出临界区
+	vTaskDelete(StartTask_Handler); //删除开始任务
 }
 
 //LED1任务函数
@@ -160,8 +178,10 @@ void print_task(void *pvParameters)
     {
         err=xSemaphoreTake(uartSemaphore,100);   //获取信号量
         if(err==pdTRUE)                         //获取信号量成功
-        {  
-            //printf("%s",Data);
+        { 
+					//进入临界区，防止数据再被更改//
+            taskENTER_CRITICAL();
+					//printf("%s",Data);
             if(rx_cnt < size)//收到的数据长度在size范围内
             {
                 //void *memcpy(void *str1, const void *str2, size_t n)  
@@ -178,6 +198,7 @@ void print_task(void *pvParameters)
 								buf[size] = 0;
             }
             rx_cnt=0;
+						taskEXIT_CRITICAL();//退出临界区，开启全局中断//
         }
 
         if(count>0)
@@ -185,7 +206,9 @@ void print_task(void *pvParameters)
 						float p,i,d;
             count=0;
 						if(buf[0] == '&'){
+							xSemaphoreTake(xTargetMutex,portMAX_DELAY);//取走互斥信号，防止其余任务对pos1buf等进行操作
 							sscanf((const char *)buf,"&%f,%f#",&pos1buf,&pos2buf);
+							xSemaphoreGive(xTargetMutex);//给出互斥信号//
 							//printf("receive:%s",buf);
 						}
 						else if(buf[0] == '$'){
@@ -212,9 +235,11 @@ void pid_task(void *pvParameters){
 //TARGET任务函数
 void target_task(void *pvParameters){
 	while(1){
+		xSemaphoreTake(xTargetMutex,portMAX_DELAY);
 		Target1 -= pos2buf / 5;
 		Target2 -= pos1buf / 4;
 		pos2buf = pos1buf = 0;
+		xSemaphoreGive(xTargetMutex);
 		Xianfu_Pwm();
 		delay_ms(1000);
 	}
@@ -222,9 +247,50 @@ void target_task(void *pvParameters){
 // 电机控制任务函数
 void motor_task(void *p_arg) 
 { 
-  int is=50;
-	u32 times_elcmotor=0;
-	float right_length;float left_length;
+	if(xSemaphoreTake(MotorStartSem,portMAX_DELAY)==pdTRUE)
+  {	
+    TickType_t xStartTick = xTaskGetTickCount();
+		const TickType_t xTwoMinTicks = pdMS_TO_TICKS(120000);
+		const TickType_t xFiveMinTicks = pdMS_TO_TICKS(300000);
+		float right_length;float left_length;
+		while(1)
+		{    
+			TickType_t xElapsed = xTaskGetTickCount() - xStartTick;
+			// 获取两路超声波距离
+			right_length = HCSR04GetLength(HCSR04_PORT_Echo, HCSR04_ECHO);
+			left_length = HCSR04GetLength(HCSR04_PORT_Echo2, HCSR04_ECHO2);
+        //小于2min循环往复前进     
+     if(xElapsed<xTwoMinTicks)
+			 //前方有障碍物直接后退3s
+     { if(right_length<25||left_length<25 )
+			 {	Contrl_Speed(-300,-300,-300,-300);
+             delay_ms(1500);
+             delay_ms(1500);
+			 }
+			 //前方无障碍物低速前进
+      else
+			{   
+				Contrl_Speed(15*20, 15*20, 15*20, 15*20);
+             delay_ms(20);
+			}
+		 }
+		 else if((xTwoMinTicks<xElapsed)&&(xElapsed<xFiveMinTicks))
+		 {//两分钟后布朗运动
+       avoid_obstacle(right_length,left_length);
+       delay_ms(20);
+		 }
+		 //5分钟后直接停止
+		else if(xElapsed>xFiveMinTicks)
+		{
+			Contrl_Speed(0,0,0,0);vTaskSuspend(NULL);					
+		}
+		 } 
+
+	}
+}
+void motor_init_task(void *pvParameters)
+{
+	int is=50;
 	HC_SR04_init();
 	//和电机模块串口通信	Serial communication with motor module
 	Motor_Usart_init();
@@ -251,34 +317,7 @@ void motor_task(void *p_arg)
 	//全速冲过中线
 	Contrl_Speed(is*20,is*20,is*20,is*20);	
 	delay_ms(2000);
-	while(1)
-	{    
-			// 获取两路超声波距离
-			right_length = HCSR04GetLength(HCSR04_PORT_Echo, HCSR04_ECHO);
-			left_length = HCSR04GetLength(HCSR04_PORT_Echo2, HCSR04_ECHO2);
-		     times_elcmotor+=50;
-        //小于2min循环往复前进     
-     if(times_elcmotor<120000)
-			 //前方有障碍物直接后退3s
-     { if(right_length<25||left_length<25 )
-			 {	Contrl_Speed(-300,-300,-300,-300);
-             delay_ms(1500);
-             delay_ms(1500);
-				  times_elcmotor+=3000;
-			 }
-			 //前方无障碍物低速前进
-      else
-			{   
-				Contrl_Speed(15*20, 15*20, 15*20, 15*20);
-             delay_ms(20);
-				     times_elcmotor+=20;
-			}
-		 }
-		 else
-		 {//两分钟后布朗运动
-       avoid_obstacle(right_length,left_length);
-       delay_ms(20);}
-
-    
-	}
+	xSemaphoreGive(MotorStartSem);
+	vTaskDelete(NULL);	
+	
 }
